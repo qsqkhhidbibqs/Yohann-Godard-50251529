@@ -47,34 +47,43 @@ MAX_DIM = 800  # max dimension to resize images for proper warping
 
 def detect_faces(image_bytes):
     """
-    Detect faces in raw image bytes.
+    Detect faces in raw image bytes using InsightFace.
     Returns a list of bounding boxes [x1, y1, x2, y2] and cropped face images.
-    Resizes image if it's too large to improve warping.
+    Resizes image if too large to improve detection.
     """
+
+    # Load image
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
     # Resize if too large
     scale = min(1.0, MAX_DIM / max(image.size))
     new_size = (int(image.width * scale), int(image.height * scale))
     image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+    # Convert to numpy (RGB)
     image_np = np.array(image)
 
-    detections = RetinaFace.detect_faces(image_np)
-    if not detections:
+    # InsightFace expects BGR
+    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+
+    # Run detection using InsightFace
+    faces = face_app.get(image_bgr)
+
+    if not faces:
         return [], []
 
     bboxes = []
     crops = []
 
-    for face in detections.values():
-        bbox = face["facial_area"]
-        bboxes.append(bbox)
+    for f in faces:
+        x1, y1, x2, y2 = f.bbox.astype(int).tolist()
+        bboxes.append([x1, y1, x2, y2])
 
-        x1, y1, x2, y2 = bbox
         face_crop = image_np[y1:y2, x1:x2]
         crops.append(Image.fromarray(face_crop))
 
     return bboxes, crops
+
 
 # --- Initialize the InsightFace model once globally ---
 face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
@@ -194,44 +203,4 @@ async def face_similarity(
 
     return {"similarity": similarity}
 
-@app.post("/detect-and-show", tags=["Face Recognition"])
-async def detect_and_show(image: UploadFile = File(...)):
-    # Read uploaded image bytes
-    image_bytes = await image.read()
 
-    # Detect faces and get crops
-    bboxes, crops = detect_faces(image_bytes)  # <-- now only 2 values returned
-
-    if not crops:
-        raise HTTPException(status_code=400, detail="No face detected")
-
-    # Convert first cropped face to bytes
-    buf = io.BytesIO()
-    crops[0].save(buf, format="JPEG")
-    buf.seek(0)
-
-    # Return the cropped face as raw image
-    return StreamingResponse(buf, media_type="image/jpeg")
-
-
-@app.post("/warp-and-show", tags=["Face Recognition"])
-async def warp_and_show(image: UploadFile = File(...)):
-    image_bytes = await image.read()
-    
-    # Detect face and keypoints
-    image_cv = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    detections = RetinaFace.detect_faces(image_cv)
-    if not detections:
-        raise HTTPException(status_code=400, detail="No face detected")
-    
-    face = list(detections.values())[0]
-    keypoints = face["landmarks"]
-    
-    # Warp
-    aligned_face = warp_face(image_bytes, keypoints)
-    
-    # Convert aligned_face (RGB) to JPEG bytes
-    aligned_bgr = cv2.cvtColor(aligned_face, cv2.COLOR_RGB2BGR)
-    _, buf = cv2.imencode(".jpg", aligned_bgr)
-    
-    return StreamingResponse(io.BytesIO(buf.tobytes()), media_type="image/jpeg")
