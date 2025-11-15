@@ -9,8 +9,6 @@ import cv2
 import torch
 from fastapi.responses import StreamingResponse
 # Libraries for face recognition
-from retinaface import RetinaFace
-from deepface import DeepFace
 from insightface.app import FaceAnalysis
 
 

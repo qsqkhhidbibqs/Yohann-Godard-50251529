@@ -4,6 +4,4 @@ numpy
 pillow
 opencv-python
 torch
-torchvision
 insightface
-deepface
