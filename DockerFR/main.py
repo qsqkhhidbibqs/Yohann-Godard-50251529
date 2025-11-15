@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 import io
+import math
 import numpy as np
 from numpy.linalg import norm
 from PIL import Image
@@ -172,20 +173,67 @@ def _to_rgb_np(img_pil: Image.Image) -> np.ndarray:
 def _cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     return float(np.dot(vec1, vec2) / (norm(vec1) * norm(vec2)))
 
+def smooth_squash(x):
+    center = 0.65   # centre du plateau 0.6–0.7
+    k = 4.0         # raideur, ajuste pour lisser/raidir
+    return 1 / (1 + math.exp(-k * (x - center)))
+
 def calculate_face_similarity(image_a_bytes: bytes, image_b_bytes: bytes) -> float:
     """
-    Calculate similarity between two face images using InsightFace embeddings.
-    The images are passed as raw bytes. No manual warping is applied.
+    End-to-end face similarity pipeline with calibrated similarity 0..1:
+    - Detect faces
+    - Align faces
+    - Use embeddings
+    - Map similarity to intuitive 0..1 scale
     """
-    try:
-        emb_a = compute_face_embedding(image_a_bytes)
-        emb_b = compute_face_embedding(image_b_bytes)
-    except ValueError as e:
-        raise ValueError("No face detected in one of the images.") from e
-    
-    
-    similarity = (float(np.dot(emb_a, emb_b)) + 1.0) / 2.0
-    return similarity
+
+    # 1. Detection
+    img_a = cv2.imdecode(np.frombuffer(image_a_bytes, np.uint8), cv2.IMREAD_COLOR)
+    img_b = cv2.imdecode(np.frombuffer(image_b_bytes, np.uint8), cv2.IMREAD_COLOR)
+
+    faces_a = face_app.get(img_a)
+    faces_b = face_app.get(img_b)
+
+    if not faces_a or not faces_b:
+        raise ValueError("No face detected in one of the images")
+
+    face_a = faces_a[0]
+    face_b = faces_b[0]
+
+    # 2. Keypoints
+    kp_a = {"left_eye": face_a.kps[0], "right_eye": face_a.kps[1],
+            "nose": face_a.kps[2], "mouth_left": face_a.kps[3], "mouth_right": face_a.kps[4]}
+    kp_b = {"left_eye": face_b.kps[0], "right_eye": face_b.kps[1],
+            "nose": face_b.kps[2], "mouth_left": face_b.kps[3], "mouth_right": face_b.kps[4]}
+
+    # 3. Warp faces (utile si tu veux afficher ou autre)
+    warped_a = warp_face(image_a_bytes, kp_a)
+    warped_b = warp_face(image_b_bytes, kp_b)
+
+    # 4. Embeddings
+    emb_a = face_a.embedding / np.linalg.norm(face_a.embedding)
+    emb_b = face_b.embedding / np.linalg.norm(face_b.embedding)
+
+    # 5. Cosine similarity
+    cosine_sim = float(np.dot(emb_a, emb_b))  # [-1,1]
+
+    # 6. Map to 0..1 with sigmoid-like calibration
+    #    - simulate 0 = très différent, 1 = même personne
+    sim_raw = (cosine_sim + 1) / 2  # basic map [-1,1] -> [0,1]
+
+    # 7. Calibration simple “min-max” interne
+    #    - valeurs typiques de Buffalo_L : différent ~0.3, même personne ~0.8
+    min_diff = 0.3
+    max_same = 0.85
+    sim_calibrated = (sim_raw - min_diff) / (max_same - min_diff)
+    sim_calibrated = np.clip(sim_calibrated, 0.0, 1.0)**2.2
+
+
+    return float(sim_calibrated)
+
+
+
+
 # ---------------------- Endpoints ----------------------
 @app.post("/face-similarity", tags=["Face Recognition"])
 async def face_similarity(
